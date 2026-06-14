@@ -1,0 +1,151 @@
+services:
+  flight-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: flights
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: flight
+    volumes:
+      - flight-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flight -d flights"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  booking-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bookings
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+    volumes:
+      - booking-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking -d bookings"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  flight-flyway:
+    image: flyway/flyway:10
+    command: -url=jdbc:postgresql://flight-db:5432/flights -user=flight -password=flight -connectRetries=60 migrate
+    volumes:
+      - ./flight-service/flyway/sql:/flyway/sql
+    depends_on:
+      flight-db:
+        condition: service_healthy
+
+  booking-flyway:
+    image: flyway/flyway:10
+    command: -url=jdbc:postgresql://booking-db:5432/bookings -user=booking -password=booking -connectRetries=60 migrate
+    volumes:
+      - ./booking-service/flyway/sql:/flyway/sql
+    depends_on:
+      booking-db:
+        condition: service_healthy
+
+  redis-master:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis-replica:
+    image: redis:7-alpine
+    command: redis-server --replicaof redis-master 6379 --appendonly yes
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  redis-sentinel-1:
+    image: redis:7-alpine
+    entrypoint: ["/bin/sh", "/sentinel-entrypoint.sh"]
+    volumes:
+      - ./redis/sentinel-entrypoint.sh:/sentinel-entrypoint.sh:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_started
+
+  redis-sentinel-2:
+    image: redis:7-alpine
+    entrypoint: ["/bin/sh", "/sentinel-entrypoint.sh"]
+    volumes:
+      - ./redis/sentinel-entrypoint.sh:/sentinel-entrypoint.sh:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_started
+
+  redis-sentinel-3:
+    image: redis:7-alpine
+    entrypoint: ["/bin/sh", "/sentinel-entrypoint.sh"]
+    volumes:
+      - ./redis/sentinel-entrypoint.sh:/sentinel-entrypoint.sh:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_started
+
+  flight-service:
+    build:
+      context: .
+      dockerfile: flight-service/Dockerfile
+    environment:
+      DB_HOST: flight-db
+      DB_PORT: 5432
+      DB_NAME: flights
+      DB_USER: flight
+      DB_PASSWORD: flight
+      GRPC_PORT: 50051
+      GRPC_API_KEY: dev-api-key
+      REDIS_SENTINEL_HOSTS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      REDIS_MASTER_NAME: mymaster
+      CACHE_TTL_SECONDS: 300
+    ports:
+      - "50051:50051"
+    depends_on:
+      flight-flyway:
+        condition: service_completed_successfully
+      redis-sentinel-1:
+        condition: service_started
+      redis-sentinel-2:
+        condition: service_started
+      redis-sentinel-3:
+        condition: service_started
+
+  booking-service:
+    build:
+      context: .
+      dockerfile: booking-service/Dockerfile
+    environment:
+      DB_HOST: booking-db
+      DB_PORT: 5432
+      DB_NAME: bookings
+      DB_USER: booking
+      DB_PASSWORD: booking
+      FLIGHT_SERVICE_HOST: flight-service:50051
+      GRPC_API_KEY: dev-api-key
+      GRPC_MAX_RETRIES: 3
+      GRPC_BASE_BACKOFF_MS: 100
+      CB_FAILURE_THRESHOLD: 5
+      CB_OPEN_TIMEOUT_SECONDS: 20
+      CB_WINDOW_SECONDS: 30
+    ports:
+      - "8080:8080"
+    depends_on:
+      booking-flyway:
+        condition: service_completed_successfully
+      flight-service:
+        condition: service_started
+
+volumes:
+  flight-db-data:
+  booking-db-data:
